@@ -508,16 +508,24 @@ async function publishDueVideos(env) {
       if (item.tiktok_url) captionParts.push(`Оригинал: ${item.tiktok_url}`);
       const caption = captionParts.join("\n\n").slice(0, 1024);
 
-      // Refresh the temporary CDN URL immediately before publication.
-      // Downloader links can expire while a video waits in the schedule.
-      const freshVideoUrl = await resolveTikTokVideo(item.tiktok_url);
-      await env.DB.prepare("UPDATE videos SET video_file_url = ? WHERE id = ?")
-        .bind(freshVideoUrl, item.video_id).run();
+      // Prefer refreshing a possibly expired CDN URL, but never let a
+      // temporary downloader/API outage discard a URL that was already saved.
+      let videoUrl = item.video_file_url;
+      try {
+        const refreshedUrl = await resolveTikTokVideo(item.tiktok_url);
+        if (refreshedUrl && /^https:\/\//i.test(refreshedUrl)) {
+          videoUrl = refreshedUrl;
+          await env.DB.prepare("UPDATE videos SET video_file_url = ? WHERE id = ?")
+            .bind(videoUrl, item.video_id).run();
+        }
+      } catch (refreshError) {
+        console.warn("TikTok URL refresh failed; trying saved video URL:", refreshError);
+      }
 
       const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: env.TELEGRAM_CHANNEL, video: freshVideoUrl, caption })
+        body: JSON.stringify({ chat_id: env.TELEGRAM_CHANNEL, video: videoUrl, caption })
       });
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.description || "Telegram sendVideo failed");
@@ -555,7 +563,8 @@ async function sendTelegram(env, chatId, text) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text })
   });
-  if (!response.ok) {
-    throw new Error(`Telegram sendMessage failed: ${response.status} ${await response.text()}`);
+  const result = await response.json().catch(() => null);
+  if (!response.ok || !result?.ok) {
+    throw new Error(`Telegram sendMessage failed: ${response.status} ${result?.description || "invalid Telegram response"}`);
   }
 }
