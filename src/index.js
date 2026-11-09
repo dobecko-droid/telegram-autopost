@@ -278,6 +278,11 @@ async function handleAiMessage(message, env) {
   }
 
   const chatId = String(message.chat.id);
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS ai_sessions (
+    chat_id TEXT PRIMARY KEY,
+    previous_response_id TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`).run();
   const userText = String(message.text || message.caption || "").trim().slice(0, 6000);
   if (!userText) return;
 
