@@ -4,7 +4,7 @@ import { readFile, unlink } from "node:fs/promises";
 
 const exec = promisify(execFile);
 const WORKER_URL = process.env.WORKER_URL;
-const RUNNER_SECRET = process.env.RUNNER_SECRET;
+const RUNNER_SECRET = String(process.env.RUNNER_SECRET || "").trim();
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
 if (!WORKER_URL || !RUNNER_SECRET || !TELEGRAM_BOT_TOKEN) {
@@ -20,9 +20,16 @@ async function worker(path, body) {
     },
     body: JSON.stringify(body)
   });
-  const data = await response.json().catch(() => ({}));
+  const responseText = await response.text();
+  let data = {};
+  try { data = responseText ? JSON.parse(responseText) : {}; } catch {}
   if (!response.ok || !data.ok) {
-    throw new Error(data.error || `Worker request failed: HTTP ${response.status}`);
+    let detail = String(data.error || responseText || "empty response");
+    for (const secret of [RUNNER_SECRET, TELEGRAM_BOT_TOKEN]) {
+      if (secret) detail = detail.split(secret).join("[redacted]");
+    }
+    detail = detail.replace(/[\\r\\n]+/g, " ").slice(0, 500);
+    throw new Error(`Worker ${path} failed: HTTP ${response.status}; ${detail}`);
   }
   return data;
 }
