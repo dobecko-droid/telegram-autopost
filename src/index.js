@@ -175,6 +175,25 @@ async function handleUpdate(update, env) {
     return;
   }
 
+  if (text.startsWith("/status")) {
+    const result = await env.DB.prepare(
+      "SELECT videos.status, videos.error_message, videos.submitted_at, publication_slots.scheduled_at FROM videos LEFT JOIN publication_slots ON publication_slots.video_id = videos.id ORDER BY videos.id DESC LIMIT 5"
+    ).all();
+    const rows = result.results || [];
+    const report = rows.length
+      ? rows.map((row, index) => {
+          const details = [
+            `${index + 1}. Статус: ${row.status}`,
+            row.scheduled_at ? `Публикация: ${row.scheduled_at} UTC` : "",
+            row.error_message ? `Ошибка: ${row.error_message}` : ""
+          ].filter(Boolean);
+          return details.join("\\n");
+        }).join("\\n\\n")
+      : "Пока нет сохранённых видео.";
+    await sendTelegram(env, message.chat.id, `📊 Последние видео:\\n\\n${report}`);
+    return;
+  }
+
   const match = text.match(TIKTOK_URL_RE);
   if (!match) {
     await sendTelegram(env, message.chat.id, "Пришли, пожалуйста, ссылку на видео TikTok.");
