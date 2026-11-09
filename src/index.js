@@ -30,7 +30,14 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/health") {
-      return Response.json({ ok: true, service: "telegram-autopost" });
+      return Response.json({
+        ok: true,
+        service: "telegram-autopost",
+        diagnostics: {
+          hasDB: Boolean(env.DB),
+          hasSecret: Boolean(String(env.TELEGRAM_WEBHOOK_SECRET || "").trim())
+        }
+      });
     }
 
     if (request.method === "GET" && url.pathname === "/setup") {
@@ -43,7 +50,7 @@ export default {
       if (!env.DB || !env.TELEGRAM_WEBHOOK_SECRET) {
         return Response.json({ ok: false, error: "D1 binding DB and TELEGRAM_WEBHOOK_SECRET are required" }, { status: 500 });
       }
-      if (request.headers.get("Authorization") !== `Bearer ${env.TELEGRAM_WEBHOOK_SECRET}`) {
+      if ((request.headers.get("Authorization") || "").trim() !== `Bearer ${String(env.TELEGRAM_WEBHOOK_SECRET).trim()}`) {
         return new Response("Unauthorized", { status: 401 });
       }
       try {
@@ -81,9 +88,16 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname.startsWith("/runner/")) {
-      if (!env.DB || !env.TELEGRAM_WEBHOOK_SECRET ||
-          request.headers.get("Authorization") !== `Bearer ${env.TELEGRAM_WEBHOOK_SECRET}`) {
-        return new Response("Unauthorized", { status: 401 });
+      if (!env.DB) {
+        return Response.json({ ok: false, error: "no_db" }, { status: 503 });
+      }
+      const configuredSecret = String(env.TELEGRAM_WEBHOOK_SECRET || "").trim();
+      if (!configuredSecret) {
+        return Response.json({ ok: false, error: "no_secret" }, { status: 503 });
+      }
+      const suppliedAuthorization = (request.headers.get("Authorization") || "").trim();
+      if (suppliedAuthorization !== `Bearer ${configuredSecret}`) {
+        return Response.json({ ok: false, error: "mismatch" }, { status: 401 });
       }
       if (url.pathname === "/runner/claim") {
         return await runnerClaim(env);
@@ -98,7 +112,7 @@ export default {
       if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET || !env.DB) {
         return Response.json({ ok: false, error: "Worker is missing required configuration" }, { status: 500 });
       }
-      if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if ((request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "").trim() !== String(env.TELEGRAM_WEBHOOK_SECRET).trim()) {
         return new Response("Unauthorized", { status: 401 });
       }
 
