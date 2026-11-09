@@ -279,15 +279,22 @@ async function fetchTikTokData(tiktokUrl) {
       name: "TikWM",
       url: () => "https://www.tikwm.com/api/",
       method: "POST",
-      body: () => new URLSearchParams({ url: tiktokUrl, hd: "1", web: "1" }),
-      parse: payload => ({
-        videoUrl: payload?.data?.hdplay || payload?.data?.play,
-        title: payload?.data?.title || "",
-        videoId: payload?.data?.id || "",
-        username: payload?.data?.author?.unique_id || "",
-        authorName: payload?.data?.author?.nickname || ""
-      }),
-      success: payload => payload?.code === 0 && !!payload?.data
+      body: () => new URLSearchParams({ url: tiktokUrl, count: "12", cursor: "0", web: "1", hd: "1" }),
+      headers: {
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+        "referer": "https://www.tikwm.com/"
+      },
+      parse: payload => {
+        const media = payload?.data?.hdplay || payload?.data?.play;
+        return {
+          videoUrl: media ? (media.startsWith("http") ? media : "https://www.tikwm.com" + (media.startsWith("/") ? "" : "/") + media) : "",
+          title: payload?.data?.title || "",
+          videoId: payload?.data?.id || "",
+          username: payload?.data?.author?.unique_id || "",
+          authorName: payload?.data?.author?.nickname || ""
+        };
+      },
+      success: payload => (payload?.code === 0 || payload?.code === "0") && !!payload?.data
     }
   ];
 
@@ -296,13 +303,16 @@ async function fetchTikTokData(tiktokUrl) {
     try {
       const response = await fetch(provider.url(), {
         method: provider.method || "GET",
-        headers: { "accept": "application/json", ...(provider.method === "POST" ? { "content-type": "application/x-www-form-urlencoded" } : {}) },
+        headers: { "accept": "application/json", ...(provider.method === "POST" ? { "content-type": "application/x-www-form-urlencoded", ...(provider.headers || {}) } : {}) },
         body: provider.body ? provider.body().toString() : undefined,
         signal: AbortSignal.timeout(60000)
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = await response.json();
-      if (!provider.success(payload)) throw new Error(payload?.error || "unexpected response format");
+      if (!provider.success(payload)) {
+        const detail = payload?.msg || payload?.message || payload?.error || JSON.stringify(payload).slice(0, 180);
+        throw new Error(detail || "unexpected response format");
+      }
       const data = provider.parse(payload);
       if (!data.videoUrl || !/^https:\/\//i.test(data.videoUrl)) {
         throw new Error("provider did not return a usable HTTPS video URL");
