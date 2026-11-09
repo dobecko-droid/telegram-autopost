@@ -523,7 +523,7 @@ function buildCaption(title) {
 async function assignPublicationSlots(env) {
   const now = new Date();
   const candidates = await env.DB.prepare(
-    "SELECT id FROM videos WHERE status = 'ready' AND video_file_url IS NOT NULL AND video_file_url != '' AND id NOT IN (SELECT video_id FROM publication_slots)"
+    "SELECT id FROM videos WHERE status = 'ready' AND ((video_file_url IS NOT NULL AND video_file_url != '') OR (telegram_file_id IS NOT NULL AND telegram_file_id != '')) AND id NOT IN (SELECT video_id FROM publication_slots)"
   ).all();
 
   for (const video of candidates.results || []) {
