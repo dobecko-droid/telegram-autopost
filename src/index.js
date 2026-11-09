@@ -487,13 +487,21 @@ async function findNextFreeSlot(env, fromDate) {
 }
 
 async function publishDueVideos(env) {
+  const nowIso = new Date().toISOString();
+  const staleBefore = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  // Recover jobs left in "publishing" after a Worker interruption.
+  await env.DB.prepare("UPDATE publication_slots SET status = 'scheduled', next_attempt_at = ? WHERE status = 'publishing' AND last_attempt_at < ?")
+    .bind(nowIso, staleBefore).run();
+
   const due = await env.DB.prepare(
-    "SELECT publication_slots.id AS slot_id, publication_slots.video_id, videos.video_file_url, videos.caption, videos.author_username, videos.tiktok_url FROM publication_slots JOIN videos ON videos.id = publication_slots.video_id WHERE publication_slots.status = 'scheduled' AND publication_slots.scheduled_at <= ? ORDER BY publication_slots.scheduled_at LIMIT 3"
-  ).bind(new Date().toISOString()).all();
+    "SELECT publication_slots.id AS slot_id, publication_slots.video_id, videos.video_file_url, videos.caption, videos.author_username, videos.tiktok_url FROM publication_slots JOIN videos ON videos.id = publication_slots.video_id WHERE publication_slots.status = 'scheduled' AND publication_slots.scheduled_at <= ? AND (publication_slots.next_attempt_at IS NULL OR publication_slots.next_attempt_at <= ?) ORDER BY publication_slots.scheduled_at LIMIT 3"
+  ).bind(nowIso, nowIso).all();
 
   for (const item of due.results || []) {
     try {
-      await env.DB.prepare("UPDATE publication_slots SET status = 'publishing' WHERE id = ? AND status = 'scheduled'").bind(item.slot_id).run();
+      const claim = await env.DB.prepare("UPDATE publication_slots SET status = 'publishing', attempt_count = attempt_count + 1, last_attempt_at = ? WHERE id = ? AND status = 'scheduled' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)")
+        .bind(nowIso, item.slot_id, nowIso).run();
+      if (!claim.meta?.changes) continue;
       const captionParts = [];
       if (item.caption) captionParts.push(item.caption);
       if (item.author_username) captionParts.push(`𝘼𝙪𝙩𝙝𝙤𝙧: @${item.author_username}`);
@@ -522,11 +530,21 @@ async function publishDueVideos(env) {
       ]);
     } catch (error) {
       console.error("Video publishing failed:", item.video_id, error);
+      const slotAttempt = await env.DB.prepare("SELECT attempt_count FROM publication_slots WHERE id = ?").bind(item.slot_id).first();
+      const count = Number(slotAttempt?.attempt_count || 1);
+      const terminal = count >= 5;
+      const delayMs = Math.min(6 * 60 * 60 * 1000, 5 * 60 * 1000 * (2 ** Math.max(0, count - 1)));
+      const retryAt = new Date(Date.now() + delayMs).toISOString();
       await env.DB.batch([
-        env.DB.prepare("UPDATE publication_slots SET status = 'failed' WHERE id = ?").bind(item.slot_id),
-        env.DB.prepare("UPDATE videos SET status = 'failed', error_message = ? WHERE id = ?")
-          .bind(String(error.message || error).slice(0, 500), item.video_id)
+        env.DB.prepare("UPDATE publication_slots SET status = ?, next_attempt_at = ? WHERE id = ?")
+          .bind(terminal ? "failed" : "scheduled", terminal ? null : retryAt, item.slot_id),
+        env.DB.prepare("UPDATE videos SET status = ?, error_message = ? WHERE id = ?")
+          .bind(terminal ? "failed" : "scheduled", String(error.message || error).slice(0, 500), item.video_id)
       ]);
+      if (!terminal && env.TELEGRAM_ADMIN_CHAT_ID) {
+        await sendTelegram(env, env.TELEGRAM_ADMIN_CHAT_ID,
+          `🔁 Публикация не прошла. Повторю автоматически через несколько минут. Попытка ${count}/5. Причина: ${String(error.message || error).slice(0, 180)}`);
+      }
     }
   }
 }
