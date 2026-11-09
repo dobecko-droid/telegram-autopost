@@ -328,14 +328,13 @@ async function fetchTikTokData(tiktokUrl) {
     }
   ];
 
-  const controllers = providers.map(() => new AbortController());
   const attempts = providers.map(async (provider, index) => {
     try {
       const response = await fetch(provider.url(), {
         method: provider.method || "GET",
         headers: { "accept": "application/json", ...(provider.headers || {}) },
         body: provider.body ? provider.body().toString() : undefined,
-        signal: controllers[index].signal
+        signal: AbortSignal.timeout(15000)
       });
       if (!response.ok) {
         const responseBody = await response.text().catch(() => "");
@@ -361,9 +360,6 @@ async function fetchTikTokData(tiktokUrl) {
     // Race providers: the first valid video URL wins; do not wait for slow
     // services one by one. Remaining requests are cancelled after a winner.
     const winner = await Promise.any(attempts);
-    controllers.forEach((controller, index) => {
-      if (providers[index].name !== winner.provider) controller.abort();
-    });
     return winner.data;
   } catch (error) {
     const errors = error instanceof AggregateError
