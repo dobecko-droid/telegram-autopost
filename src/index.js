@@ -340,7 +340,11 @@ async function fetchTikTokData(tiktokUrl) {
     }
   ];
 
-  const attempts = providers.map(async (provider, index) => {
+  // Try providers sequentially. Starting every free API at once wastes
+  // daily quotas even when an early provider succeeds; sequential fallback
+  // contacts the next service only when the previous one actually fails.
+  const errors = [];
+  for (const provider of providers) {
     try {
       const response = await fetch(provider.url(), {
         method: provider.method || "GET",
@@ -361,24 +365,16 @@ async function fetchTikTokData(tiktokUrl) {
       if (!data.videoUrl || !/^https:\/\//i.test(data.videoUrl)) {
         throw new Error("provider did not return a usable HTTPS video URL");
       }
-      return { provider: provider.name, data };
+      console.info("TikTok download provider succeeded:", provider.name);
+      return data;
     } catch (error) {
-      console.error("TikTok provider failed:", provider.name, error);
-      throw new Error(`${provider.name}: ${String(error.message || error)}`);
+      const message = `${provider.name}: ${String(error.message || error)}`;
+      errors.push(message);
+      console.error("TikTok provider failed:", message);
     }
-  });
-
-  try {
-    // Race providers: the first valid video URL wins; do not wait for slow
-    // services one by one. Remaining requests are cancelled after a winner.
-    const winner = await Promise.any(attempts);
-    return winner.data;
-  } catch (error) {
-    const errors = error instanceof AggregateError
-      ? error.errors.map(item => String(item.message || item))
-      : [String(error.message || error)];
-    throw new Error(errors.join("; ").slice(0, 450) || "All TikTok download providers failed");
   }
+
+  throw new Error(errors.join("; ").slice(0, 450) || "All TikTok download providers failed");
 }
 
 async function resolveTikTokVideo(tiktokUrl) {
