@@ -282,6 +282,7 @@ async function runnerClaim(env) {
 }
 
 async function runnerComplete(request, env) {
+  await ensureColumn(env.DB, "videos", "telegram_file_id", "TEXT");
   let body;
   try { body = await request.json(); }
   catch { return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 }); }
@@ -521,6 +522,7 @@ function buildCaption(title) {
 }
 
 async function assignPublicationSlots(env) {
+  await ensureColumn(env.DB, "videos", "telegram_file_id", "TEXT");
   const now = new Date();
   const candidates = await env.DB.prepare(
     "SELECT id FROM videos WHERE status = 'ready' AND ((video_file_url IS NOT NULL AND video_file_url != '') OR (telegram_file_id IS NOT NULL AND telegram_file_id != '')) AND id NOT IN (SELECT video_id FROM publication_slots)"
@@ -565,6 +567,7 @@ async function findNextFreeSlot(env, fromDate) {
 }
 
 async function publishDueVideos(env) {
+  await ensureColumn(env.DB, "videos", "telegram_file_id", "TEXT");
   const nowIso = new Date().toISOString();
   const staleBefore = new Date(Date.now() - 10 * 60 * 1000).toISOString();
   // Recover jobs left in "publishing" after a Worker interruption.
