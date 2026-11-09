@@ -91,8 +91,85 @@ async function runSchedule(env) {
     return;
   }
 
+  await processQueuedVideos(env);
   await assignPublicationSlots(env);
   await publishDueVideos(env);
+}
+
+async function processQueuedVideos(env) {
+  // ClipX currently documents a no-key endpoint with a 10 requests/minute
+  // and 100 requests/day limit. Process one link per cron run to stay gentle.
+  const item = await env.DB.prepare(
+    "SELECT id, tiktok_url FROM videos WHERE status = 'queued' ORDER BY submitted_at, id LIMIT 1"
+  ).first();
+  if (!item) return;
+
+  await env.DB.prepare(
+    "UPDATE videos SET status = 'processing', error_message = NULL WHERE id = ? AND status = 'queued'"
+  ).bind(item.id).run();
+
+  try {
+    const apiUrl = new URL("https://clipx.zamdev.workers.dev/");
+    apiUrl.searchParams.set("url", item.tiktok_url);
+    apiUrl.searchParams.set("quality", "best");
+    apiUrl.searchParams.set("audio", "true");
+    apiUrl.searchParams.set("cover", "false");
+    apiUrl.searchParams.set("metadata", "false");
+
+    const response = await fetch(apiUrl.toString(), {
+      headers: { "accept": "application/json" },
+      signal: AbortSignal.timeout(60000)
+    });
+    if (!response.ok) throw new Error(`TikTok service returned HTTP ${response.status}`);
+
+    const payload = await response.json();
+    if (!payload?.success || !payload?.data) {
+      throw new Error(payload?.error || "TikTok service could not process this link");
+    }
+
+    const data = payload.data;
+    const videoUrl = data.video?.hd_mp4 || data.video?.standard_mp4 || data.video?.wmplay;
+    if (!videoUrl || !/^https:\/\//i.test(videoUrl)) {
+      throw new Error("TikTok service did not return a usable MP4 URL");
+    }
+
+    const title = String(data.title || "").trim();
+    const username = String(data.author?.username || "").replace(/^@/, "").trim();
+    const caption = buildCaption(title, username);
+
+    await env.DB.prepare(
+      "UPDATE videos SET video_id = ?, author_username = ?, author_name = ?, video_file_url = ?, caption = ?, status = 'ready', error_message = NULL WHERE id = ?"
+    ).bind(
+      data.id ? String(data.id) : null,
+      username || null,
+      data.author?.nickname ? String(data.author.nickname) : null,
+      videoUrl,
+      caption,
+      item.id
+    ).run();
+
+    if (env.TELEGRAM_ADMIN_CHAT_ID) {
+      await sendTelegram(env, env.TELEGRAM_ADMIN_CHAT_ID,
+        `✅ TikTok-видео обработано и поставлено в очередь публикации.\nАвтор: ${username ? "@" + username : "не указан"}`);
+    }
+  } catch (error) {
+    console.error("TikTok processing failed:", item.id, error);
+    await env.DB.prepare(
+      "UPDATE videos SET status = 'failed', error_message = ? WHERE id = ?"
+    ).bind(String(error.message || error).slice(0, 500), item.id).run();
+
+    if (env.TELEGRAM_ADMIN_CHAT_ID) {
+      await sendTelegram(env, env.TELEGRAM_ADMIN_CHAT_ID,
+        `⚠️ Не удалось обработать TikTok-ссылку. Пришли её ещё раз позже. Причина: ${String(error.message || error).slice(0, 250)}`);
+    }
+  }
+}
+
+function buildCaption(title, username) {
+  const parts = [];
+  if (title) parts.push(title.slice(0, 700));
+  if (username) parts.push(`Автор: @${username}`);
+  return parts.join("\\n\\n").slice(0, 900);
 }
 
 async function assignPublicationSlots(env) {
