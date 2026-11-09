@@ -5,7 +5,7 @@ import { readFile, unlink } from "node:fs/promises";
 const exec = promisify(execFile);
 const WORKER_URL = process.env.WORKER_URL;
 const RUNNER_SECRET = String(process.env.RUNNER_SECRET || "").trim();
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
 
 if (!WORKER_URL || !RUNNER_SECRET || !TELEGRAM_BOT_TOKEN) {
   throw new Error("Missing WORKER_URL, RUNNER_SECRET or TELEGRAM_BOT_TOKEN");
@@ -28,7 +28,7 @@ async function worker(path, body) {
     for (const secret of [RUNNER_SECRET, TELEGRAM_BOT_TOKEN]) {
       if (secret) detail = detail.split(secret).join("[redacted]");
     }
-    detail = detail.replace(/[\\r\\n]+/g, " ").slice(0, 500);
+    detail = detail.replace(/[\r\n]+/g, " ").slice(0, 500);
     throw new Error(`Worker ${path} failed: HTTP ${response.status}; ${detail}`);
   }
   return data;
