@@ -96,6 +96,33 @@ async function runSchedule(env) {
   await publishDueVideos(env);
 }
 
+
+async function resolveTikTokVideo(tiktokUrl) {
+  const apiUrl = new URL("https://clipx.zamdev.workers.dev/");
+  apiUrl.searchParams.set("url", tiktokUrl);
+  apiUrl.searchParams.set("quality", "best");
+  apiUrl.searchParams.set("audio", "true");
+  apiUrl.searchParams.set("cover", "false");
+  apiUrl.searchParams.set("metadata", "false");
+
+  const response = await fetch(apiUrl.toString(), {
+    headers: { "accept": "application/json" },
+    signal: AbortSignal.timeout(60000)
+  });
+  if (!response.ok) throw new Error(`TikTok service returned HTTP ${response.status}`);
+
+  const payload = await response.json();
+  if (!payload?.success || !payload?.data) {
+    throw new Error(payload?.error || "TikTok service could not process this link");
+  }
+  const videoUrl = payload.data.video?.hd_mp4 ||
+    payload.data.video?.standard_mp4 || payload.data.video?.wmplay;
+  if (!videoUrl || !/^https:\/\//i.test(videoUrl)) {
+    throw new Error("TikTok service did not return a usable MP4 URL");
+  }
+  return videoUrl;
+}
+
 async function processQueuedVideos(env) {
   // ClipX currently documents a no-key endpoint with a 10 requests/minute
   // and 100 requests/day limit. Process one link per cron run to stay gentle.
@@ -229,10 +256,16 @@ async function publishDueVideos(env) {
       if (item.tiktok_url) captionParts.push(`Оригинал: ${item.tiktok_url}`);
       const caption = captionParts.join("\n\n").slice(0, 1024);
 
+      // Refresh the temporary CDN URL immediately before publication.
+      // Downloader links can expire while a video waits in the schedule.
+      const freshVideoUrl = await resolveTikTokVideo(item.tiktok_url);
+      await env.DB.prepare("UPDATE videos SET video_file_url = ? WHERE id = ?")
+        .bind(freshVideoUrl, item.video_id).run();
+
       const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: env.TELEGRAM_CHANNEL, video: item.video_file_url, caption })
+        body: JSON.stringify({ chat_id: env.TELEGRAM_CHANNEL, video: freshVideoUrl, caption })
       });
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.description || "Telegram sendVideo failed");
