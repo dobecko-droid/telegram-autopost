@@ -207,9 +207,21 @@ async function handleUpdate(update, env) {
 
   if (result.meta?.changes) {
     await sendTelegram(env, message.chat.id,
-      "✅ Ссылка принята и добавлена в очередь. Следующий этап — подключение загрузчика TikTok.");
+      "✅ Ссылка принята и добавлена в очередь на обработку.");
   } else {
-    await sendTelegram(env, message.chat.id, "ℹ️ Эта ссылка уже была добавлена. Повторно её не добавляю.");
+    const existing = await env.DB.prepare(
+      "SELECT id, status FROM videos WHERE tiktok_url = ?"
+    ).bind(tiktokUrl).first();
+    if (existing?.status === "failed") {
+      await env.DB.prepare("DELETE FROM publication_slots WHERE video_id = ?").bind(existing.id).run();
+      await env.DB.prepare(
+        "UPDATE videos SET status = 'queued', error_message = NULL, video_file_url = NULL WHERE id = ?"
+      ).bind(existing.id).run();
+      await sendTelegram(env, message.chat.id,
+        "🔄 Предыдущая попытка завершилась ошибкой. Ссылку вернул в очередь, попробую снова.");
+    } else {
+      await sendTelegram(env, message.chat.id, "ℹ️ Эта ссылка уже добавлена. Текущий статус: " + (existing?.status || "неизвестен") + ".");
+    }
   }
 }
 
