@@ -80,6 +80,20 @@ export default {
       return Response.json({ ok: true, webhook_url: webhookUrl, description: "Telegram webhook configured" });
     }
 
+    if (request.method === "POST" && url.pathname.startsWith("/runner/")) {
+      if (!env.DB || !env.TELEGRAM_WEBHOOK_SECRET ||
+          request.headers.get("Authorization") !== `Bearer ${env.TELEGRAM_WEBHOOK_SECRET}`) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+      if (url.pathname === "/runner/claim") {
+        return await runnerClaim(env);
+      }
+      if (url.pathname === "/runner/complete") {
+        return await runnerComplete(request, env);
+      }
+      return Response.json({ ok: false, error: "Not found" }, { status: 404 });
+    }
+
     if (request.method === "POST" && url.pathname === "/webhook") {
       if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET || !env.DB) {
         return Response.json({ ok: false, error: "Worker is missing required configuration" }, { status: 500 });
@@ -100,7 +114,7 @@ export default {
         // Start processing a newly submitted link immediately instead of waiting
         // for the next five-minute cron tick. The DB claim below prevents races.
         ctx.waitUntil((async () => {
-          await processQueuedVideos(env);
+          if (env.EXTERNAL_DOWNLOADER !== "true") await processQueuedVideos(env);
           await assignPublicationSlots(env);
         })().catch(error => console.error("Immediate video processing failed:", error)));
         return new Response("OK");
@@ -158,6 +172,7 @@ async function initializeDatabase(db) {
   await ensureColumn(db, "videos", "attempt_count", "INTEGER NOT NULL DEFAULT 0");
   await ensureColumn(db, "videos", "next_attempt_at", "TEXT");
   await ensureColumn(db, "videos", "last_attempt_at", "TEXT");
+  await ensureColumn(db, "videos", "telegram_file_id", "TEXT");
   await ensureColumn(db, "publication_slots", "attempt_count", "INTEGER NOT NULL DEFAULT 0");
   await ensureColumn(db, "publication_slots", "next_attempt_at", "TEXT");
   await ensureColumn(db, "publication_slots", "last_attempt_at", "TEXT");
@@ -233,7 +248,7 @@ async function handleUpdate(update, env) {
     if (existing?.status === "failed") {
       await env.DB.prepare("DELETE FROM publication_slots WHERE video_id = ?").bind(existing.id).run();
       await env.DB.prepare(
-        "UPDATE videos SET status = 'queued', error_message = NULL, video_file_url = NULL WHERE id = ?"
+        "UPDATE videos SET status = 'queued', error_message = NULL, video_file_url = NULL, telegram_file_id = NULL, next_attempt_at = NULL WHERE id = ?"
       ).bind(existing.id).run();
       await sendTelegram(env, message.chat.id,
         "🔄 Предыдущая попытка завершилась ошибкой. Ссылку вернул в очередь, попробую снова.");
@@ -243,13 +258,80 @@ async function handleUpdate(update, env) {
   }
 }
 
+async function runnerClaim(env) {
+  const nowIso = new Date().toISOString();
+  const staleBefore = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  await env.DB.prepare(
+    "UPDATE videos SET status = 'queued', next_attempt_at = ? WHERE status = 'processing' AND last_attempt_at < ?"
+  ).bind(nowIso, staleBefore).run();
+
+  const item = await env.DB.prepare(
+    "SELECT id, tiktok_url, source_chat_id, attempt_count FROM videos WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY submitted_at, id LIMIT 1"
+  ).bind(nowIso).first();
+  if (!item) return Response.json({ ok: true, item: null });
+
+  const claim = await env.DB.prepare(
+    "UPDATE videos SET status = 'processing', attempt_count = attempt_count + 1, last_attempt_at = ?, error_message = NULL WHERE id = ? AND status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
+  ).bind(nowIso, item.id, nowIso).run();
+  if (!claim.meta?.changes) return Response.json({ ok: true, item: null });
+
+  return Response.json({
+    ok: true,
+    item: { id: item.id, url: item.tiktok_url, source_chat_id: item.source_chat_id }
+  });
+}
+
+async function runnerComplete(request, env) {
+  let body;
+  try { body = await request.json(); }
+  catch { return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 }); }
+
+  const id = Number(body?.id);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    return Response.json({ ok: false, error: "Valid id is required" }, { status: 400 });
+  }
+
+  const current = await env.DB.prepare(
+    "SELECT status, attempt_count, source_chat_id FROM videos WHERE id = ?"
+  ).bind(id).first();
+  if (!current || current.status !== "processing") {
+    return Response.json({ ok: false, error: "Job is not currently processing" }, { status: 409 });
+  }
+
+  if (body.ok === true) {
+    const fileId = String(body.telegram_file_id || "");
+    if (!fileId) return Response.json({ ok: false, error: "telegram_file_id is required" }, { status: 400 });
+    const caption = String(body.caption || "").trim().slice(0, 900);
+    const username = String(body.author_username || "").replace(/^@/, "").trim().slice(0, 100);
+    const authorName = String(body.author_name || "").trim().slice(0, 200);
+    await env.DB.prepare(
+      "UPDATE videos SET video_id = ?, author_username = ?, author_name = ?, telegram_file_id = ?, video_file_url = NULL, caption = ?, status = 'ready', error_message = NULL, next_attempt_at = NULL WHERE id = ? AND status = 'processing'"
+    ).bind(
+      body.video_id ? String(body.video_id).slice(0, 100) : null,
+      username || null, authorName || null, fileId, caption, id
+    ).run();
+    await assignPublicationSlots(env);
+    return Response.json({ ok: true, status: "ready" });
+  }
+
+  const message = String(body.error || "GitHub runner failed").slice(0, 500);
+  const count = Number(current.attempt_count || 1);
+  const terminal = count >= 5;
+  const delayMs = Math.min(6 * 60 * 60 * 1000, 5 * 60 * 1000 * (2 ** Math.max(0, count - 1)));
+  const retryAt = new Date(Date.now() + delayMs).toISOString();
+  await env.DB.prepare(
+    "UPDATE videos SET status = ?, next_attempt_at = ?, error_message = ? WHERE id = ? AND status = 'processing'"
+  ).bind(terminal ? "failed" : "queued", terminal ? null : retryAt, message, id).run();
+  return Response.json({ ok: true, status: terminal ? "failed" : "queued", retry_at: terminal ? null : retryAt });
+}
+
 async function runSchedule(env) {
   if (!env.DB || !env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHANNEL) {
     console.error("Scheduler is missing DB, TELEGRAM_BOT_TOKEN, or TELEGRAM_CHANNEL");
     return;
   }
 
-  await processQueuedVideos(env);
+  if (env.EXTERNAL_DOWNLOADER !== "true") await processQueuedVideos(env);
   await assignPublicationSlots(env);
   await publishDueVideos(env);
 }
@@ -490,7 +572,7 @@ async function publishDueVideos(env) {
     .bind(nowIso, staleBefore).run();
 
   const due = await env.DB.prepare(
-    "SELECT publication_slots.id AS slot_id, publication_slots.video_id, videos.video_file_url, videos.caption, videos.author_username, videos.tiktok_url FROM publication_slots JOIN videos ON videos.id = publication_slots.video_id WHERE publication_slots.status = 'scheduled' AND publication_slots.scheduled_at <= ? AND (publication_slots.next_attempt_at IS NULL OR publication_slots.next_attempt_at <= ?) ORDER BY publication_slots.scheduled_at LIMIT 3"
+    "SELECT publication_slots.id AS slot_id, publication_slots.video_id, videos.video_file_url, videos.telegram_file_id, videos.caption, videos.author_username, videos.tiktok_url FROM publication_slots JOIN videos ON videos.id = publication_slots.video_id WHERE publication_slots.status = 'scheduled' AND publication_slots.scheduled_at <= ? AND (publication_slots.next_attempt_at IS NULL OR publication_slots.next_attempt_at <= ?) ORDER BY publication_slots.scheduled_at LIMIT 3"
   ).bind(nowIso, nowIso).all();
 
   for (const item of due.results || []) {
@@ -506,22 +588,25 @@ async function publishDueVideos(env) {
 
       // Prefer refreshing a possibly expired CDN URL, but never let a
       // temporary downloader/API outage discard a URL that was already saved.
-      let videoUrl = item.video_file_url;
-      try {
-        const refreshedUrl = await resolveTikTokVideo(item.tiktok_url);
-        if (refreshedUrl && /^https:\/\//i.test(refreshedUrl)) {
-          videoUrl = refreshedUrl;
-          await env.DB.prepare("UPDATE videos SET video_file_url = ? WHERE id = ?")
-            .bind(videoUrl, item.video_id).run();
+      let video = item.telegram_file_id || item.video_file_url;
+      if (!item.telegram_file_id) {
+        try {
+          const refreshedUrl = await resolveTikTokVideo(item.tiktok_url);
+          if (refreshedUrl && /^https:\/\//i.test(refreshedUrl)) {
+            video = refreshedUrl;
+            await env.DB.prepare("UPDATE videos SET video_file_url = ? WHERE id = ?")
+              .bind(video, item.video_id).run();
+          }
+        } catch (refreshError) {
+          console.warn("TikTok URL refresh failed; trying saved video URL:", refreshError);
         }
-      } catch (refreshError) {
-        console.warn("TikTok URL refresh failed; trying saved video URL:", refreshError);
       }
+      if (!video) throw new Error("No Telegram file_id or video URL is stored");
 
       const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: env.TELEGRAM_CHANNEL, video: videoUrl, caption })
+        body: JSON.stringify({ chat_id: env.TELEGRAM_CHANNEL, video, caption })
       });
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.description || "Telegram sendVideo failed");
