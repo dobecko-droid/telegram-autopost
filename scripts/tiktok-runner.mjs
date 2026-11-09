@@ -71,8 +71,10 @@ async function run() {
     const { stdout: pathOutput } = await exec("yt-dlp", [
       "--no-warnings",
       "--no-playlist",
-      "--format", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
-      "--merge-output-format", "mp4",
+      // TikTok normally provides a progressive MP4 containing both audio
+      // and video. Select a single-file MP4 so this runner does not need
+      // FFmpeg installation/merging (which previously consumed the whole job).
+      "--format", "b[ext=mp4]",
       "--max-filesize", "49M",
       "--output", "video.%(ext)s",
       "--print", "after_move:filepath",
