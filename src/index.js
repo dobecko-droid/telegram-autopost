@@ -21,7 +21,7 @@ document.getElementById('db').addEventListener('click',async()=>{out.textContent
 document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();out.textContent='Подключаю Telegram…';try{await post('/admin/setup-webhook');out.textContent='Готово! Telegram подключён.';}catch(e){out.textContent='Ошибка: '+e.message;}});
 </script></html>`;
 
-const TIKTOK_URL_RE = /https?:\/\/(?:www\.|vm\.|vt\.)?tiktok\.com\/[^\s]+/i;
+const TIKTOK_URL_RE = /https?:\/\/(?:www\.|vm\.|vt\.|m\.|t\.)?tiktok\.com\/[^\s]+/i;
 const TIME_ZONE = "Asia/Tashkent";
 const DAILY_TIMES = [[10, 0], [15, 0], [20, 0]];
 
