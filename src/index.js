@@ -662,11 +662,16 @@ async function publishDueVideos(env) {
       const claim = await env.DB.prepare("UPDATE publication_slots SET status = 'publishing', attempt_count = attempt_count + 1, last_attempt_at = ? WHERE id = ? AND status = 'scheduled' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)")
         .bind(nowIso, item.slot_id, nowIso).run();
       if (!claim.meta?.changes) continue;
-      const captionParts = [];
-      if (item.caption) captionParts.push(item.caption);
-      if (item.author_username) captionParts.push(`𝘼𝙪𝙩𝙝𝙤𝙧: @${item.author_username}`);
-      if (item.tiktok_url) captionParts.push(`Оригинал: ${item.tiktok_url}`);
-      const caption = captionParts.join("\n\n").slice(0, 1024);
+      // Keep attribution and the original TikTok URL intact even when the
+      // creator's description is unusually long. Telegram captions are limited
+      // to 1024 characters.
+      const attribution = [];
+      if (item.author_username) attribution.push(`𝘼𝙪𝙩𝙝𝙤𝙧: @${item.author_username}`);
+      if (item.tiktok_url) attribution.push(`Оригинал: ${item.tiktok_url}`);
+      const attributionText = attribution.join("\n\n");
+      const descriptionLimit = Math.max(0, 1024 - attributionText.length - (attributionText ? 2 : 0));
+      const description = String(item.caption || "").trim().slice(0, descriptionLimit);
+      const caption = [description, attributionText].filter(Boolean).join("\n\n");
 
       // Prefer refreshing a possibly expired CDN URL, but never let a
       // temporary downloader/API outage discard a URL that was already saved.
