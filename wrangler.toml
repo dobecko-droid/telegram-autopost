@@ -5,7 +5,7 @@ compatibility_date = "2026-11-09"
 [[d1_databases]]
 binding = "DB"
 database_name = "telegram_autopost_db"
-database_id = "REPLACE_WITH_CLOUDFLARE_D1_DATABASE_ID"
+database_id = "35f8c6f3-73e4-44d6-83af-3142a8d0070e"
 
 [triggers]
 crons = ["*/5 * * * *"]
