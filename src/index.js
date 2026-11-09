@@ -1,4 +1,6 @@
 const TIKTOK_URL_RE = /https?:\/\/(?:www\.|vm\.|vt\.)?tiktok\.com\/[^\s]+/i;
+const TIME_ZONE = "Asia/Tashkent";
+const DAILY_TIMES = [[10, 0], [15, 0], [20, 0]];
 
 export default {
   async fetch(request, env) {
@@ -12,7 +14,6 @@ export default {
       if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET || !env.DB) {
         return Response.json({ ok: false, error: "Worker is missing required configuration" }, { status: 500 });
       }
-
       if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.TELEGRAM_WEBHOOK_SECRET) {
         return new Response("Unauthorized", { status: 401 });
       }
@@ -34,6 +35,10 @@ export default {
     }
 
     return Response.json({ ok: false, error: "Not found" }, { status: 404 });
+  },
+
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(runSchedule(env));
   }
 };
 
@@ -41,7 +46,6 @@ async function handleUpdate(update, env) {
   const message = update?.message;
   if (!message?.chat?.id) return;
 
-  // Optional safety lock: when configured, only this Telegram user may submit links.
   if (env.TELEGRAM_ALLOWED_USER_ID && String(message.from?.id) !== String(env.TELEGRAM_ALLOWED_USER_ID)) {
     return;
   }
@@ -50,7 +54,7 @@ async function handleUpdate(update, env) {
 
   if (text.startsWith("/start") || text.startsWith("/help")) {
     await sendTelegram(env, message.chat.id,
-      "Привет! Отправь ссылку на TikTok-видео — я добавлю её в очередь. Команда /queue покажет количество принятых ссылок.");
+      "Привет! Отправь ссылку на TikTok-видео — я добавлю её в очередь. Команда /queue покажет количество ссылок.");
     return;
   }
 
@@ -64,7 +68,7 @@ async function handleUpdate(update, env) {
 
   const match = text.match(TIKTOK_URL_RE);
   if (!match) {
-    await sendTelegram(env, message.chat.id, "Пришли, пожалуйста, обычную ссылку на видео TikTok.");
+    await sendTelegram(env, message.chat.id, "Пришли, пожалуйста, ссылку на видео TikTok.");
     return;
   }
 
@@ -75,10 +79,102 @@ async function handleUpdate(update, env) {
 
   if (result.meta?.changes) {
     await sendTelegram(env, message.chat.id,
-      "✅ Ссылка принята и добавлена в очередь. Сейчас бот сохраняет ссылки; загрузка видео и автопубликация ещё не подключены.");
+      "✅ Ссылка принята и добавлена в очередь. Следующий этап — подключение загрузчика TikTok.");
   } else {
-    await sendTelegram(env, message.chat.id,
-      "ℹ️ Эта ссылка уже была добавлена. Повторно её не добавляю.");
+    await sendTelegram(env, message.chat.id, "ℹ️ Эта ссылка уже была добавлена. Повторно её не добавляю.");
+  }
+}
+
+async function runSchedule(env) {
+  if (!env.DB || !env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHANNEL) {
+    console.error("Scheduler is missing DB, TELEGRAM_BOT_TOKEN, or TELEGRAM_CHANNEL");
+    return;
+  }
+
+  await assignPublicationSlots(env);
+  await publishDueVideos(env);
+}
+
+async function assignPublicationSlots(env) {
+  const now = new Date();
+  const candidates = await env.DB.prepare(
+    "SELECT id FROM videos WHERE status = 'ready' AND video_file_url IS NOT NULL AND video_file_url != '' AND id NOT IN (SELECT video_id FROM publication_slots)"
+  ).all();
+
+  for (const video of candidates.results || []) {
+    const slot = await findNextFreeSlot(env, now);
+    if (!slot) return;
+
+    const inserted = await env.DB.prepare(
+      "INSERT OR IGNORE INTO publication_slots (video_id, scheduled_at, status) VALUES (?, ?, 'scheduled')"
+    ).bind(video.id, slot).run();
+
+    if (inserted.meta?.changes) {
+      await env.DB.prepare("UPDATE videos SET status = 'scheduled' WHERE id = ?").bind(video.id).run();
+    }
+  }
+}
+
+async function findNextFreeSlot(env, fromDate) {
+  const occupiedResult = await env.DB.prepare(
+    "SELECT scheduled_at FROM publication_slots WHERE status IN ('scheduled', 'publishing', 'published')"
+  ).all();
+  const occupied = new Set((occupiedResult.results || []).map(row => row.scheduled_at));
+
+  for (let day = 0; day < 14; day++) {
+    const date = new Date(fromDate.getTime() + day * 86400000);
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit"
+    }).formatToParts(date);
+    const part = Object.fromEntries(parts.map(item => [item.type, item.value]));
+    const y = Number(part.year), m = Number(part.month), d = Number(part.day);
+
+    for (const [hour, minute] of DAILY_TIMES) {
+      const slotDate = new Date(Date.UTC(y, m - 1, d, hour - 5, minute));
+      if (slotDate <= fromDate) continue;
+      const iso = slotDate.toISOString();
+      if (!occupied.has(iso)) return iso;
+    }
+  }
+  return null;
+}
+
+async function publishDueVideos(env) {
+  const due = await env.DB.prepare(
+    "SELECT publication_slots.id AS slot_id, publication_slots.video_id, videos.video_file_url, videos.caption, videos.author_username, videos.tiktok_url FROM publication_slots JOIN videos ON videos.id = publication_slots.video_id WHERE publication_slots.status = 'scheduled' AND publication_slots.scheduled_at <= ? ORDER BY publication_slots.scheduled_at LIMIT 3"
+  ).bind(new Date().toISOString()).all();
+
+  for (const item of due.results || []) {
+    try {
+      await env.DB.prepare("UPDATE publication_slots SET status = 'publishing' WHERE id = ? AND status = 'scheduled'").bind(item.slot_id).run();
+      const captionParts = [];
+      if (item.caption) captionParts.push(item.caption);
+      if (item.author_username) captionParts.push(`Автор: @${item.author_username}`);
+      if (item.tiktok_url) captionParts.push(`Оригинал: ${item.tiktok_url}`);
+      const caption = captionParts.join("\n\n").slice(0, 1024);
+
+      const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: env.TELEGRAM_CHANNEL, video: item.video_file_url, caption })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.description || "Telegram sendVideo failed");
+
+      await env.DB.batch([
+        env.DB.prepare("UPDATE publication_slots SET status = 'published', telegram_message_id = ? WHERE id = ?")
+          .bind(String(result.result.message_id), item.slot_id),
+        env.DB.prepare("UPDATE videos SET status = 'published', published_at = CURRENT_TIMESTAMP WHERE id = ?")
+          .bind(item.video_id)
+      ]);
+    } catch (error) {
+      console.error("Video publishing failed:", item.video_id, error);
+      await env.DB.batch([
+        env.DB.prepare("UPDATE publication_slots SET status = 'failed' WHERE id = ?").bind(item.slot_id),
+        env.DB.prepare("UPDATE videos SET status = 'failed', error_message = ? WHERE id = ?")
+          .bind(String(error.message || error).slice(0, 500), item.video_id)
+      ]);
+    }
   }
 }
 
@@ -88,7 +184,6 @@ async function sendTelegram(env, chatId, text) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text })
   });
-
   if (!response.ok) {
     throw new Error(`Telegram sendMessage failed: ${response.status} ${await response.text()}`);
   }
