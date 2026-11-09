@@ -155,6 +155,18 @@ async function initializeDatabase(db) {
     "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('timezone', 'Asia/Tashkent'), ('daily_limit', '3'), ('telegram_channel', '@zadrot1705')"
   ];
   for (const sql of statements) await db.prepare(sql).run();
+  await ensureColumn(db, "videos", "attempt_count", "INTEGER NOT NULL DEFAULT 0");
+  await ensureColumn(db, "videos", "next_attempt_at", "TEXT");
+  await ensureColumn(db, "videos", "last_attempt_at", "TEXT");
+  await ensureColumn(db, "publication_slots", "attempt_count", "INTEGER NOT NULL DEFAULT 0");
+  await ensureColumn(db, "publication_slots", "next_attempt_at", "TEXT");
+  await ensureColumn(db, "publication_slots", "last_attempt_at", "TEXT");
+}
+
+async function ensureColumn(db, table, column, definition) {
+  const result = await db.prepare("PRAGMA table_info(" + table + ")").all();
+  const exists = (result.results || []).some(item => item.name === column);
+  if (!exists) await db.prepare("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition).run();
 }
 
 async function handleUpdate(update, env) {
@@ -375,14 +387,18 @@ async function resolveTikTokVideo(tiktokUrl) {
 }
 
 async function processQueuedVideos(env) {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const staleBefore = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
+  await env.DB.prepare("UPDATE videos SET status = 'queued', next_attempt_at = ? WHERE status = 'processing' AND last_attempt_at < ?").bind(nowIso, staleBefore).run();
   const item = await env.DB.prepare(
-    "SELECT id, tiktok_url FROM videos WHERE status = 'queued' ORDER BY submitted_at, id LIMIT 1"
-  ).first();
+    "SELECT id, tiktok_url FROM videos WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY submitted_at, id LIMIT 1"
+  ).bind(nowIso).first();
   if (!item) return;
 
   const claim = await env.DB.prepare(
-    "UPDATE videos SET status = 'processing', error_message = NULL WHERE id = ? AND status = 'queued'"
-  ).bind(item.id).run();
+    "UPDATE videos SET status = 'processing', attempt_count = attempt_count + 1, last_attempt_at = ?, error_message = NULL WHERE id = ? AND status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
+  ).bind(nowIso, item.id, nowIso).run();
   if (!claim.meta?.changes) return;
 
   try {
@@ -406,9 +422,12 @@ async function processQueuedVideos(env) {
     }
   } catch (error) {
     console.error("TikTok processing failed:", item.id, error);
-    await env.DB.prepare(
-      "UPDATE videos SET status = 'failed', error_message = ? WHERE id = ?"
-    ).bind(String(error.message || error).slice(0, 500), item.id).run();
+    const attempts = await env.DB.prepare("SELECT attempt_count FROM videos WHERE id = ?").bind(item.id).first();
+    const count = Number(attempts?.attempt_count || 1);
+    const terminal = count >= 5;
+    const delayMs = Math.min(6 * 60 * 60 * 1000, 5 * 60 * 1000 * (2 ** Math.max(0, count - 1)));
+    const retryAt = new Date(Date.now() + delayMs).toISOString();
+    await env.DB.prepare("UPDATE videos SET status = ?, next_attempt_at = ?, error_message = ? WHERE id = ?").bind(terminal ? "failed" : "queued", terminal ? null : retryAt, String(error.message || error).slice(0, 500), item.id).run();
 
     if (env.TELEGRAM_ADMIN_CHAT_ID) {
       await sendTelegram(env, env.TELEGRAM_ADMIN_CHAT_ID,
@@ -477,7 +496,7 @@ async function publishDueVideos(env) {
       await env.DB.prepare("UPDATE publication_slots SET status = 'publishing' WHERE id = ? AND status = 'scheduled'").bind(item.slot_id).run();
       const captionParts = [];
       if (item.caption) captionParts.push(item.caption);
-      if (item.author_username) captionParts.push(`Автор: @${item.author_username}`);
+      if (item.author_username) captionParts.push(`𝘼𝙪𝙩𝙝𝙤𝙧: @${item.author_username}`);
       if (item.tiktok_url) captionParts.push(`Оригинал: ${item.tiktok_url}`);
       const caption = captionParts.join("\n\n").slice(0, 1024);
 
