@@ -66,16 +66,16 @@ export default {
       if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET) {
         return Response.json({ ok: false, error: "Set TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET first" }, { status: 500 });
       }
-      if (request.headers.get("Authorization") !== `Bearer ${env.TELEGRAM_WEBHOOK_SECRET}`) {
+      if ((request.headers.get("Authorization") || "").trim() !== `Bearer ${String(env.TELEGRAM_WEBHOOK_SECRET).trim()}`) {
         return new Response("Unauthorized", { status: 401 });
       }
       const webhookUrl = `${url.origin}/webhook`;
-      const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`, {
+      const response = await fetch(`https://api.telegram.org/bot${String(env.TELEGRAM_BOT_TOKEN).trim()}/setWebhook`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           url: webhookUrl,
-          secret_token: env.TELEGRAM_WEBHOOK_SECRET,
+          secret_token: String(env.TELEGRAM_WEBHOOK_SECRET).trim(),
           allowed_updates: ["message"],
           drop_pending_updates: false
         })
