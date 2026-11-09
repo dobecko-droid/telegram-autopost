@@ -277,9 +277,12 @@ async function fetchTikTokData(tiktokUrl) {
     },
     {
       name: "TikWM",
-      url: () => "https://www.tikwm.com/api/",
-      method: "POST",
-      body: () => new URLSearchParams({ url: tiktokUrl, count: "12", cursor: "0", web: "1", hd: "1" }),
+      url: () => {
+        const apiUrl = new URL("https://www.tikwm.com/api/");
+        apiUrl.searchParams.set("url", tiktokUrl);
+        apiUrl.searchParams.set("hd", "1");
+        return apiUrl.toString();
+      },
       headers: {
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
         "referer": "https://www.tikwm.com/"
@@ -287,7 +290,7 @@ async function fetchTikTokData(tiktokUrl) {
       parse: payload => {
         const media = payload?.data?.hdplay || payload?.data?.play;
         return {
-          videoUrl: media ? (media.startsWith("http") ? media : "https://www.tikwm.com" + (media.startsWith("/") ? "" : "/") + media) : "",
+          videoUrl: media ? (media.startsWith("http") ? media : media.startsWith("//") ? "https:" + media : "https://www.tikwm.com" + (media.startsWith("/") ? "" : "/") + media) : "",
           title: payload?.data?.title || "",
           videoId: payload?.data?.id || "",
           username: payload?.data?.author?.unique_id || "",
