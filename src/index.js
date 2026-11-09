@@ -225,35 +225,75 @@ async function runSchedule(env) {
 }
 
 
+async function fetchTikTokData(tiktokUrl) {
+  const providers = [
+    {
+      name: "ClipX",
+      url: () => {
+        const apiUrl = new URL("https://clipx.zamdev.workers.dev/");
+        apiUrl.searchParams.set("url", tiktokUrl);
+        apiUrl.searchParams.set("quality", "best");
+        apiUrl.searchParams.set("audio", "true");
+        apiUrl.searchParams.set("cover", "false");
+        apiUrl.searchParams.set("metadata", "false");
+        return apiUrl.toString();
+      },
+      parse: payload => ({
+        videoUrl: payload?.data?.video?.hd_mp4 || payload?.data?.video?.standard_mp4 || payload?.data?.video?.wmplay,
+        title: payload?.data?.title || "",
+        videoId: payload?.data?.id || "",
+        username: payload?.data?.author?.username || "",
+        authorName: payload?.data?.author?.nickname || ""
+      }),
+      success: payload => payload?.success === true && !!payload?.data
+    },
+    {
+      name: "TikTok fallback",
+      url: () => {
+        const apiUrl = new URL("https://tdownv4.sl-bjs.workers.dev/");
+        apiUrl.searchParams.set("down", tiktokUrl);
+        return apiUrl.toString();
+      },
+      parse: payload => ({
+        videoUrl: payload?.download_url,
+        title: payload?.title || "",
+        videoId: payload?.video_id || "",
+        username: payload?.author?.username || "",
+        authorName: payload?.author?.nickname || payload?.author?.username || ""
+      }),
+      success: payload => !!payload?.download_url
+    }
+  ];
+
+  const errors = [];
+  for (const provider of providers) {
+    try {
+      const response = await fetch(provider.url(), {
+        headers: { "accept": "application/json" },
+        signal: AbortSignal.timeout(60000)
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      if (!provider.success(payload)) throw new Error(payload?.error || "unexpected response format");
+      const data = provider.parse(payload);
+      if (!data.videoUrl || !/^https:\/\//i.test(data.videoUrl)) {
+        throw new Error("provider did not return a usable HTTPS video URL");
+      }
+      return data;
+    } catch (error) {
+      errors.push(`${provider.name}: ${String(error.message || error)}`);
+      console.error("TikTok provider failed:", provider.name, error);
+    }
+  }
+  throw new Error(errors.join("; ").slice(0, 450) || "All TikTok download providers failed");
+}
+
 async function resolveTikTokVideo(tiktokUrl) {
-  const apiUrl = new URL("https://clipx.zamdev.workers.dev/");
-  apiUrl.searchParams.set("url", tiktokUrl);
-  apiUrl.searchParams.set("quality", "best");
-  apiUrl.searchParams.set("audio", "true");
-  apiUrl.searchParams.set("cover", "false");
-  apiUrl.searchParams.set("metadata", "false");
-
-  const response = await fetch(apiUrl.toString(), {
-    headers: { "accept": "application/json" },
-    signal: AbortSignal.timeout(60000)
-  });
-  if (!response.ok) throw new Error(`TikTok service returned HTTP ${response.status}`);
-
-  const payload = await response.json();
-  if (!payload?.success || !payload?.data) {
-    throw new Error(payload?.error || "TikTok service could not process this link");
-  }
-  const videoUrl = payload.data.video?.hd_mp4 ||
-    payload.data.video?.standard_mp4 || payload.data.video?.wmplay;
-  if (!videoUrl || !/^https:\/\//i.test(videoUrl)) {
-    throw new Error("TikTok service did not return a usable MP4 URL");
-  }
-  return videoUrl;
+  const data = await fetchTikTokData(tiktokUrl);
+  return data.videoUrl;
 }
 
 async function processQueuedVideos(env) {
-  // ClipX currently documents a no-key endpoint with a 10 requests/minute
-  // and 100 requests/day limit. Process one link per cron run to stay gentle.
   const item = await env.DB.prepare(
     "SELECT id, tiktok_url FROM videos WHERE status = 'queued' ORDER BY submitted_at, id LIMIT 1"
   ).first();
@@ -264,48 +304,23 @@ async function processQueuedVideos(env) {
   ).bind(item.id).run();
 
   try {
-    const apiUrl = new URL("https://clipx.zamdev.workers.dev/");
-    apiUrl.searchParams.set("url", item.tiktok_url);
-    apiUrl.searchParams.set("quality", "best");
-    apiUrl.searchParams.set("audio", "true");
-    apiUrl.searchParams.set("cover", "false");
-    apiUrl.searchParams.set("metadata", "false");
-
-    const response = await fetch(apiUrl.toString(), {
-      headers: { "accept": "application/json" },
-      signal: AbortSignal.timeout(60000)
-    });
-    if (!response.ok) throw new Error(`TikTok service returned HTTP ${response.status}`);
-
-    const payload = await response.json();
-    if (!payload?.success || !payload?.data) {
-      throw new Error(payload?.error || "TikTok service could not process this link");
-    }
-
-    const data = payload.data;
-    const videoUrl = data.video?.hd_mp4 || data.video?.standard_mp4 || data.video?.wmplay;
-    if (!videoUrl || !/^https:\/\//i.test(videoUrl)) {
-      throw new Error("TikTok service did not return a usable MP4 URL");
-    }
-
-    const title = String(data.title || "").trim();
-    const username = String(data.author?.username || "").replace(/^@/, "").trim();
-    const caption = buildCaption(title);
+    const data = await fetchTikTokData(item.tiktok_url);
+    const caption = buildCaption(data.title);
 
     await env.DB.prepare(
       "UPDATE videos SET video_id = ?, author_username = ?, author_name = ?, video_file_url = ?, caption = ?, status = 'ready', error_message = NULL WHERE id = ?"
     ).bind(
-      data.id ? String(data.id) : null,
-      username || null,
-      data.author?.nickname ? String(data.author.nickname) : null,
-      videoUrl,
+      data.videoId ? String(data.videoId) : null,
+      data.username ? String(data.username).replace(/^@/, "") : null,
+      data.authorName ? String(data.authorName) : null,
+      data.videoUrl,
       caption,
       item.id
     ).run();
 
     if (env.TELEGRAM_ADMIN_CHAT_ID) {
       await sendTelegram(env, env.TELEGRAM_ADMIN_CHAT_ID,
-        `✅ TikTok-видео обработано и поставлено в очередь публикации.\nАвтор: ${username ? "@" + username : "не указан"}`);
+        `✅ TikTok-видео обработано и поставлено в очередь публикации.\nАвтор: ${data.username ? "@" + data.username : "не указан"}`);
     }
   } catch (error) {
     console.error("TikTok processing failed:", item.id, error);
