@@ -187,8 +187,8 @@ async function handleUpdate(update, env) {
             row.scheduled_at ? `Публикация: ${row.scheduled_at} UTC` : "",
             row.error_message ? `Ошибка: ${row.error_message}` : ""
           ].filter(Boolean);
-          return details.join("\\n");
-        }).join("\\n\\n")
+          return details.join("\n");
+        }).join("\n\n")
       : "Пока нет сохранённых видео.";
     await sendTelegram(env, message.chat.id, `📊 Последние видео:\\n\\n${report}`);
     return;
