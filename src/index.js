@@ -274,6 +274,20 @@ async function fetchTikTokData(tiktokUrl) {
         authorName: payload?.author?.nickname || payload?.author?.username || ""
       }),
       success: payload => !!payload?.download_url
+    },
+    {
+      name: "TikWM",
+      url: () => "https://www.tikwm.com/api/",
+      method: "POST",
+      body: () => new URLSearchParams({ url: tiktokUrl, hd: "1", web: "1" }),
+      parse: payload => ({
+        videoUrl: payload?.data?.hdplay || payload?.data?.play,
+        title: payload?.data?.title || "",
+        videoId: payload?.data?.id || "",
+        username: payload?.data?.author?.unique_id || "",
+        authorName: payload?.data?.author?.nickname || ""
+      }),
+      success: payload => payload?.code === 0 && !!payload?.data
     }
   ];
 
@@ -281,7 +295,9 @@ async function fetchTikTokData(tiktokUrl) {
   for (const provider of providers) {
     try {
       const response = await fetch(provider.url(), {
-        headers: { "accept": "application/json" },
+        method: provider.method || "GET",
+        headers: { "accept": "application/json", ...(provider.method === "POST" ? { "content-type": "application/x-www-form-urlencoded" } : {}) },
+        body: provider.body ? provider.body().toString() : undefined,
         signal: AbortSignal.timeout(60000)
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
