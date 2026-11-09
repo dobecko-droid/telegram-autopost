@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS videos (
   author_username TEXT,
   author_name TEXT,
   video_file_url TEXT,
+  telegram_file_id TEXT,
   caption TEXT,
   popular_comment TEXT,
   status TEXT NOT NULL DEFAULT 'queued'
