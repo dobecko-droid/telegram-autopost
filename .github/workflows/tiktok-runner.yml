@@ -24,14 +24,10 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install downloader and media tools
+      - name: Install downloader
         run: |
           python -m pip install --upgrade yt-dlp
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get install -y ffmpeg
-          fi
           yt-dlp --version
-          ffmpeg -version | head -n 1
 
       - name: Validate JavaScript
         run: |
