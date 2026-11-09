@@ -240,6 +240,27 @@ async function runSchedule(env) {
 async function fetchTikTokData(tiktokUrl) {
   const providers = [
     {
+      name: "DrummerDuck",
+      url: () => {
+        const apiUrl = new URL("https://download-tktk-video.drummerduck.com/api/extract");
+        apiUrl.searchParams.set("url", tiktokUrl);
+        return apiUrl.toString();
+      },
+      parse: payload => {
+        const media = (payload?.data?.media || []).find(item => item?.type === "video") || payload?.data?.media?.[0];
+        const variants = media?.variants || [];
+        const best = variants.find(item => item?.url && /mp4/i.test(item?.container || "mp4")) || variants.find(item => item?.url);
+        return {
+          videoUrl: best?.url || "",
+          title: payload?.data?.text || "",
+          videoId: "",
+          username: payload?.data?.author?.handle || "",
+          authorName: payload?.data?.author?.name || ""
+        };
+      },
+      success: payload => payload?.ok === true && !!payload?.data?.media?.length
+    },
+    {
       name: "ClipX",
       url: () => {
         const apiUrl = new URL("https://clipx.zamdev.workers.dev/");
