@@ -166,7 +166,12 @@ async function initializeDatabase(db) {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     )`,
-    "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('timezone', 'Asia/Tashkent'), ('daily_limit', '3'), ('telegram_channel', '@zadrot1705')"
+    "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('timezone', 'Asia/Tashkent'), ('daily_limit', '3'), ('telegram_channel', '@zadrot1705')",
+    `CREATE TABLE IF NOT EXISTS ai_sessions (
+      chat_id TEXT PRIMARY KEY,
+      previous_response_id TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
   ];
   for (const sql of statements) await db.prepare(sql).run();
   await ensureColumn(db, "videos", "attempt_count", "INTEGER NOT NULL DEFAULT 0");
@@ -227,9 +232,16 @@ async function handleUpdate(update, env) {
     return;
   }
 
+  if (text.startsWith("/resetai")) {
+    await env.DB.prepare("DELETE FROM ai_sessions WHERE chat_id = ?").bind(String(message.chat.id)).run();
+    await sendTelegram(env, message.chat.id, "🧠 Контекст разговора с ИИ очищен. Можем начать заново.");
+    return;
+  }
+
   const match = text.match(TIKTOK_URL_RE);
   if (!match) {
-    await sendTelegram(env, message.chat.id, "Пришли, пожалуйста, ссылку на видео TikTok.");
+    if (!text.trim()) return;
+    await handleAiMessage(message, env);
     return;
   }
 
@@ -255,6 +267,68 @@ async function handleUpdate(update, env) {
     } else {
       await sendTelegram(env, message.chat.id, "ℹ️ Эта ссылка уже добавлена. Текущий статус: " + (existing?.status || "неизвестен") + ".");
     }
+  }
+}
+
+async function handleAiMessage(message, env) {
+  if (!env.OPENAI_API_KEY) {
+    await sendTelegram(env, message.chat.id,
+      "ИИ-помощник пока не подключён: администратору нужно добавить секрет OPENAI_API_KEY в Cloudflare Worker. Токен Telegram для этого не подходит.");
+    return;
+  }
+
+  const chatId = String(message.chat.id);
+  const userText = String(message.text || message.caption || "").trim().slice(0, 6000);
+  if (!userText) return;
+
+  try {
+    const session = await env.DB.prepare(
+      "SELECT previous_response_id FROM ai_sessions WHERE chat_id = ?"
+    ).bind(chatId).first();
+
+    const payload = {
+      model: env.OPENAI_MODEL || "gpt-5.4-mini",
+      instructions: "Ты — полезный русскоязычный ИИ-помощник внутри Telegram-бота. Отвечай понятно, доброжелательно и по делу. Учитывай контекст предыдущих сообщений. Если не уверен — честно скажи. Не утверждай, что выполнил действия вне чата. Пользователь может писать по-русски или по-узбекски; отвечай на языке сообщения.",
+      input: userText,
+      max_output_tokens: 700,
+      store: true
+    };
+    if (session?.previous_response_id) payload.previous_response_id = session.previous_response_id;
+
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30000)
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || result.error) {
+      console.error("OpenAI API error:", response.status, result.error || result);
+      throw new Error(result.error?.message || `OpenAI API HTTP ${response.status}`);
+    }
+
+    const answer = String(result.output_text || (result.output || [])
+      .flatMap(item => item.content || [])
+      .filter(item => item.type === "output_text")
+      .map(item => item.text || "")
+      .join("\\n")).trim();
+
+    if (!answer) throw new Error("ИИ вернул пустой ответ");
+    if (result.id) {
+      await env.DB.prepare(
+        "INSERT INTO ai_sessions (chat_id, previous_response_id, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(chat_id) DO UPDATE SET previous_response_id = excluded.previous_response_id, updated_at = CURRENT_TIMESTAMP"
+      ).bind(chatId, result.id).run();
+    }
+
+    // Telegram text messages are limited to 4096 characters.
+    await sendTelegram(env, chatId, answer.slice(0, 3900));
+  } catch (error) {
+    console.error("AI assistant failed:", error);
+    await sendTelegram(env, chatId,
+      "Не получилось получить ответ от ИИ. Проверь, добавлен ли OPENAI_API_KEY и включена ли оплата API. Попробуй ещё раз чуть позже.");
   }
 }
 
