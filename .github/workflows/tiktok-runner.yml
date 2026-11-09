@@ -37,7 +37,7 @@ jobs:
       - name: Process one queued TikTok video
         env:
           WORKER_URL: https://telegram-autopost.dovudbekpubg.workers.dev/
-          RUNNER_SECRET: ${{ secrets.RUNNER_SECRET }}
+          RUNNER_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           if [ -z "$RUNNER_SECRET" ] || [ -z "$TELEGRAM_BOT_TOKEN" ]; then
