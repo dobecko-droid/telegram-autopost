@@ -135,7 +135,7 @@ async function processQueuedVideos(env) {
 
     const title = String(data.title || "").trim();
     const username = String(data.author?.username || "").replace(/^@/, "").trim();
-    const caption = buildCaption(title, username);
+    const caption = buildCaption(title);
 
     await env.DB.prepare(
       "UPDATE videos SET video_id = ?, author_username = ?, author_name = ?, video_file_url = ?, caption = ?, status = 'ready', error_message = NULL WHERE id = ?"
@@ -165,11 +165,10 @@ async function processQueuedVideos(env) {
   }
 }
 
-function buildCaption(title, username) {
-  const parts = [];
-  if (title) parts.push(title.slice(0, 700));
-  if (username) parts.push(`Автор: @${username}`);
-  return parts.join("\\n\\n").slice(0, 900);
+function buildCaption(title) {
+  // Keep the creator's original TikTok text and hashtags; author and source
+  // link are appended separately when the video is published to Telegram.
+  return String(title || "").trim().slice(0, 900);
 }
 
 async function assignPublicationSlots(env) {
