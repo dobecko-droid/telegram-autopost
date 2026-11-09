@@ -14,3 +14,4 @@ crons = ["*/5 * * * *"]
 TIMEZONE = "Asia/Tashkent"
 TELEGRAM_CHANNEL = "@zadrot1705"
 DAILY_LIMIT = "3"
+EXTERNAL_DOWNLOADER = "true"
