@@ -26,7 +26,7 @@ const TIME_ZONE = "Asia/Tashkent";
 const DAILY_TIMES = [[10, 0], [15, 0], [20, 0]];
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/health") {
@@ -97,6 +97,12 @@ export default {
 
       try {
         await handleUpdate(update, env);
+        // Start processing a newly submitted link immediately instead of waiting
+        // for the next five-minute cron tick. The DB claim below prevents races.
+        ctx.waitUntil((async () => {
+          await processQueuedVideos(env);
+          await assignPublicationSlots(env);
+        })().catch(error => console.error("Immediate video processing failed:", error)));
         return new Response("OK");
       } catch (error) {
         console.error("Webhook processing failed:", error);
@@ -322,14 +328,14 @@ async function fetchTikTokData(tiktokUrl) {
     }
   ];
 
-  const errors = [];
-  for (const provider of providers) {
+  const controllers = providers.map(() => new AbortController());
+  const attempts = providers.map(async (provider, index) => {
     try {
       const response = await fetch(provider.url(), {
         method: provider.method || "GET",
-        headers: { "accept": "application/json", ...(provider.method === "POST" ? { "content-type": "application/x-www-form-urlencoded", ...(provider.headers || {}) } : {}) },
+        headers: { "accept": "application/json", ...(provider.headers || {}) },
         body: provider.body ? provider.body().toString() : undefined,
-        signal: AbortSignal.timeout(60000)
+        signal: controllers[index].signal
       });
       if (!response.ok) {
         const responseBody = await response.text().catch(() => "");
@@ -344,13 +350,27 @@ async function fetchTikTokData(tiktokUrl) {
       if (!data.videoUrl || !/^https:\/\//i.test(data.videoUrl)) {
         throw new Error("provider did not return a usable HTTPS video URL");
       }
-      return data;
+      return { provider: provider.name, data };
     } catch (error) {
-      errors.push(`${provider.name}: ${String(error.message || error)}`);
       console.error("TikTok provider failed:", provider.name, error);
+      throw new Error(`${provider.name}: ${String(error.message || error)}`);
     }
+  });
+
+  try {
+    // Race providers: the first valid video URL wins; do not wait for slow
+    // services one by one. Remaining requests are cancelled after a winner.
+    const winner = await Promise.any(attempts);
+    controllers.forEach((controller, index) => {
+      if (providers[index].name !== winner.provider) controller.abort();
+    });
+    return winner.data;
+  } catch (error) {
+    const errors = error instanceof AggregateError
+      ? error.errors.map(item => String(item.message || item))
+      : [String(error.message || error)];
+    throw new Error(errors.join("; ").slice(0, 450) || "All TikTok download providers failed");
   }
-  throw new Error(errors.join("; ").slice(0, 450) || "All TikTok download providers failed");
 }
 
 async function resolveTikTokVideo(tiktokUrl) {
@@ -364,9 +384,10 @@ async function processQueuedVideos(env) {
   ).first();
   if (!item) return;
 
-  await env.DB.prepare(
+  const claim = await env.DB.prepare(
     "UPDATE videos SET status = 'processing', error_message = NULL WHERE id = ? AND status = 'queued'"
   ).bind(item.id).run();
+  if (!claim.meta?.changes) return;
 
   try {
     const data = await fetchTikTokData(item.tiktok_url);
