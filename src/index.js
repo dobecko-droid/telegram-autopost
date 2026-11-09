@@ -91,7 +91,7 @@ export default {
       if (!env.DB) {
         return Response.json({ ok: false, error: "no_db" }, { status: 503 });
       }
-      const configuredSecret = String(env.TELEGRAM_WEBHOOK_SECRET || "").trim();
+      const configuredSecret = String(env.RUNNER_SECRET || "").trim() || String(env.TELEGRAM_WEBHOOK_SECRET || "").trim();
       if (!configuredSecret) {
         return Response.json({ ok: false, error: "no_secret" }, { status: 503 });
       }
