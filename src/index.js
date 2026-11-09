@@ -1,4 +1,3 @@
-const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const TIKTOK_URL_RE = /https?:\/\/(?:www\.|vm\.|vt\.)?tiktok\.com\/[^\s]+/i;
 
 export default {
@@ -14,8 +13,7 @@ export default {
         return Response.json({ ok: false, error: "Worker is missing required configuration" }, { status: 500 });
       }
 
-      const suppliedSecret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
-      if (suppliedSecret !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.TELEGRAM_WEBHOOK_SECRET) {
         return new Response("Unauthorized", { status: 401 });
       }
 
@@ -40,17 +38,33 @@ export default {
 };
 
 async function handleUpdate(update, env) {
-  const message = update?.message || update?.channel_post;
+  const message = update?.message;
   if (!message?.chat?.id) return;
 
-  const text = message.text || message.caption || "";
-  const match = text.match(TIKTOK_URL_RE);
+  // Optional safety lock: when configured, only this Telegram user may submit links.
+  if (env.TELEGRAM_ALLOWED_USER_ID && String(message.from?.id) !== String(env.TELEGRAM_ALLOWED_USER_ID)) {
+    return;
+  }
 
+  const text = message.text || message.caption || "";
+
+  if (text.startsWith("/start") || text.startsWith("/help")) {
+    await sendTelegram(env, message.chat.id,
+      "Привет! Отправь ссылку на TikTok-видео — я добавлю её в очередь. Команда /queue покажет количество принятых ссылок.");
+    return;
+  }
+
+  if (text.startsWith("/queue")) {
+    const result = await env.DB.prepare(
+      "SELECT COUNT(*) AS total FROM videos WHERE status IN ('queued', 'processing', 'ready', 'scheduled')"
+    ).first();
+    await sendTelegram(env, message.chat.id, `📥 В очереди: ${result?.total ?? 0}`);
+    return;
+  }
+
+  const match = text.match(TIKTOK_URL_RE);
   if (!match) {
-    if (text.startsWith("/start")) {
-      await sendTelegram(env, message.chat.id,
-        "Привет! Отправь мне ссылку на TikTok-видео. Я добавлю её в очередь и сообщу результат.");
-    }
+    await sendTelegram(env, message.chat.id, "Пришли, пожалуйста, обычную ссылку на видео TikTok.");
     return;
   }
 
@@ -61,10 +75,10 @@ async function handleUpdate(update, env) {
 
   if (result.meta?.changes) {
     await sendTelegram(env, message.chat.id,
-      "✅ Ссылка добавлена в очередь. Пока это только приём ссылки — загрузчик TikTok и автоматическая публикация ещё настраиваются.");
+      "✅ Ссылка принята и добавлена в очередь. Сейчас бот сохраняет ссылки; загрузка видео и автопубликация ещё не подключены.");
   } else {
     await sendTelegram(env, message.chat.id,
-      "ℹ️ Эта ссылка уже есть в очереди или была обработана ранее. Повторно добавлять её не буду.");
+      "ℹ️ Эта ссылка уже была добавлена. Повторно её не добавляю.");
   }
 }
 
@@ -76,7 +90,6 @@ async function sendTelegram(env, chatId, text) {
   });
 
   if (!response.ok) {
-    const details = await response.text();
-    throw new Error(`Telegram sendMessage failed: ${response.status} ${details}`);
+    throw new Error(`Telegram sendMessage failed: ${response.status} ${await response.text()}`);
   }
 }
