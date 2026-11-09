@@ -30,9 +30,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      - name: Validate JavaScript
+        run: |
+          node --check src/index.js
+          node --check scripts/tiktok-runner.mjs
+
       - name: Process one queued TikTok video
         env:
           WORKER_URL: https://telegram-autopost.dovudbekpubg.workers.dev/
           RUNNER_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        run: node scripts/tiktok-runner.mjs
+        run: |
+          if [ -z "$RUNNER_SECRET" ] || [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "Required repository secrets are not configured yet; skipping the runner."
+            exit 0
+          fi
+          node scripts/tiktok-runner.mjs
