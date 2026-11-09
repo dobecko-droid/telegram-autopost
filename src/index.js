@@ -331,7 +331,10 @@ async function fetchTikTokData(tiktokUrl) {
         body: provider.body ? provider.body().toString() : undefined,
         signal: AbortSignal.timeout(60000)
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        const responseBody = await response.text().catch(() => "");
+        throw new Error(`HTTP ${response.status}${responseBody ? ": " + responseBody.slice(0, 180) : ""}`);
+      }
       const payload = await response.json();
       if (!provider.success(payload)) {
         const detail = payload?.msg || payload?.message || payload?.error || JSON.stringify(payload).slice(0, 180);
