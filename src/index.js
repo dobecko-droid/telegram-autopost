@@ -91,12 +91,14 @@ export default {
       if (!env.DB) {
         return Response.json({ ok: false, error: "no_db" }, { status: 503 });
       }
-      const configuredSecret = String(env.RUNNER_SECRET || "").trim() || String(env.TELEGRAM_WEBHOOK_SECRET || "").trim();
-      if (!configuredSecret) {
+      const acceptedSecrets = [env.RUNNER_SECRET, env.TELEGRAM_WEBHOOK_SECRET]
+        .map(value => String(value || "").trim())
+        .filter(Boolean);
+      if (!acceptedSecrets.length) {
         return Response.json({ ok: false, error: "no_secret" }, { status: 503 });
       }
       const suppliedAuthorization = (request.headers.get("Authorization") || "").trim();
-      if (suppliedAuthorization !== `Bearer ${configuredSecret}`) {
+      if (!acceptedSecrets.some(secret => suppliedAuthorization === `Bearer ${secret}`)) {
         return Response.json({ ok: false, error: "mismatch" }, { status: 401 });
       }
       if (url.pathname === "/runner/claim") {
