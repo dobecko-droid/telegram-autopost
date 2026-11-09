@@ -16,7 +16,7 @@ input{background:#222;color:#fff}button{background:#2684ff;color:white;border:0;
 const secret=()=>document.getElementById('secret').value;
 const out=document.getElementById('result');
 async function post(path){const r=await fetch(path,{method:'POST',headers:{Authorization:'Bearer '+secret()}});
- const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Ошибка настройки');return j;}
+ const raw=await r.text();let j={};try{j=raw?JSON.parse(raw):{};}catch{}if(!r.ok||!j.ok)throw new Error(j.error||(r.status===401?'Доступ запрещён (401): введённый секрет не совпадает с TELEGRAM_WEBHOOK_SECRET в Cloudflare.':'HTTP '+r.status+(raw?': '+raw:'')));return j;}
 document.getElementById('db').addEventListener('click',async()=>{out.textContent='Создаю таблицы…';try{await post('/admin/init-db');out.textContent='Готово! База данных подготовлена.';}catch(e){out.textContent='Ошибка: '+e.message;}});
 document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();out.textContent='Подключаю Telegram…';try{await post('/admin/setup-webhook');out.textContent='Готово! Telegram подключён.';}catch(e){out.textContent='Ошибка: '+e.message;}});
 </script></html>`;
