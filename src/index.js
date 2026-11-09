@@ -1,3 +1,26 @@
+
+const SETUP_PAGE = `<!doctype html>
+<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Настройка Telegram</title>
+<style>
+body{font:16px system-ui;max-width:520px;margin:40px auto;padding:0 18px;background:#111;color:#eee}
+input,button{box-sizing:border-box;width:100%;padding:14px;margin:10px 0;border-radius:9px;border:1px solid #555;font:inherit}
+input{background:#222;color:#fff}button{background:#2684ff;color:white;border:0;font-weight:600}
+#result{white-space:pre-wrap;overflow-wrap:anywhere}
+</style>
+<h2>Подключение Telegram-бота</h2>
+<p>Вставь сюда значение <b>TELEGRAM_WEBHOOK_SECRET</b>, которое сохранено в Cloudflare. Токен бота сюда вводить не нужно.</p>
+<form id="f"><input id="secret" type="password" autocomplete="off" placeholder="TELEGRAM_WEBHOOK_SECRET" required><button>Подключить webhook</button></form>
+<p id="result"></p>
+<script>
+document.getElementById('f').addEventListener('submit',async e=>{
+ e.preventDefault();const out=document.getElementById('result');out.textContent='Подключаю…';
+ try{const r=await fetch('/admin/setup-webhook',{method:'POST',headers:{Authorization:'Bearer '+document.getElementById('secret').value}});
+ const j=await r.json();out.textContent=j.ok?'Готово! Webhook подключён.':('Ошибка: '+(j.error||'неизвестная ошибка'));
+ }catch(err){out.textContent='Ошибка соединения: '+err.message;}
+});
+</script></html>`;
+
 const TIKTOK_URL_RE = /https?:\/\/(?:www\.|vm\.|vt\.)?tiktok\.com\/[^\s]+/i;
 const TIME_ZONE = "Asia/Tashkent";
 const DAILY_TIMES = [[10, 0], [15, 0], [20, 0]];
@@ -8,6 +31,37 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/health") {
       return Response.json({ ok: true, service: "telegram-autopost" });
+    }
+
+    if (request.method === "GET" && url.pathname === "/setup") {
+      return new Response(SETUP_PAGE, {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }
+      });
+    }
+
+    if (request.method === "POST" && url.pathname === "/admin/setup-webhook") {
+      if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET) {
+        return Response.json({ ok: false, error: "Set TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET first" }, { status: 500 });
+      }
+      if (request.headers.get("Authorization") !== `Bearer ${env.TELEGRAM_WEBHOOK_SECRET}`) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+      const webhookUrl = `${url.origin}/webhook`;
+      const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          url: webhookUrl,
+          secret_token: env.TELEGRAM_WEBHOOK_SECRET,
+          allowed_updates: ["message"],
+          drop_pending_updates: false
+        })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) {
+        return Response.json({ ok: false, error: result.description || "Telegram setWebhook failed" }, { status: 502 });
+      }
+      return Response.json({ ok: true, webhook_url: webhookUrl, description: "Telegram webhook configured" });
     }
 
     if (request.method === "POST" && url.pathname === "/webhook") {
