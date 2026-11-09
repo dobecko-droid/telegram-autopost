@@ -10,15 +10,15 @@ input{background:#222;color:#fff}button{background:#2684ff;color:white;border:0;
 </style>
 <h2>Подключение Telegram-бота</h2>
 <p>Вставь сюда значение <b>TELEGRAM_WEBHOOK_SECRET</b>, которое сохранено в Cloudflare. Токен бота сюда вводить не нужно.</p>
-<form id="f"><input id="secret" type="password" autocomplete="off" placeholder="TELEGRAM_WEBHOOK_SECRET" required><button>Подключить webhook</button></form>
+<form id="f"><input id="secret" type="password" autocomplete="off" placeholder="TELEGRAM_WEBHOOK_SECRET" required><button type="button" id="db">1. Подготовить базу данных</button><button type="submit">2. Подключить Telegram</button></form>
 <p id="result"></p>
 <script>
-document.getElementById('f').addEventListener('submit',async e=>{
- e.preventDefault();const out=document.getElementById('result');out.textContent='Подключаю…';
- try{const r=await fetch('/admin/setup-webhook',{method:'POST',headers:{Authorization:'Bearer '+document.getElementById('secret').value}});
- const j=await r.json();out.textContent=j.ok?'Готово! Webhook подключён.':('Ошибка: '+(j.error||'неизвестная ошибка'));
- }catch(err){out.textContent='Ошибка соединения: '+err.message;}
-});
+const secret=()=>document.getElementById('secret').value;
+const out=document.getElementById('result');
+async function post(path){const r=await fetch(path,{method:'POST',headers:{Authorization:'Bearer '+secret()}});
+ const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Ошибка настройки');return j;}
+document.getElementById('db').addEventListener('click',async()=>{out.textContent='Создаю таблицы…';try{await post('/admin/init-db');out.textContent='Готово! База данных подготовлена.';}catch(e){out.textContent='Ошибка: '+e.message;}});
+document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();out.textContent='Подключаю Telegram…';try{await post('/admin/setup-webhook');out.textContent='Готово! Telegram подключён.';}catch(e){out.textContent='Ошибка: '+e.message;}});
 </script></html>`;
 
 const TIKTOK_URL_RE = /https?:\/\/(?:www\.|vm\.|vt\.)?tiktok\.com\/[^\s]+/i;
@@ -37,6 +37,22 @@ export default {
       return new Response(SETUP_PAGE, {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }
       });
+    }
+
+    if (request.method === "POST" && url.pathname === "/admin/init-db") {
+      if (!env.DB || !env.TELEGRAM_WEBHOOK_SECRET) {
+        return Response.json({ ok: false, error: "D1 binding DB and TELEGRAM_WEBHOOK_SECRET are required" }, { status: 500 });
+      }
+      if (request.headers.get("Authorization") !== `Bearer ${env.TELEGRAM_WEBHOOK_SECRET}`) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+      try {
+        await initializeDatabase(env.DB);
+        return Response.json({ ok: true, description: "Database initialized" });
+      } catch (error) {
+        console.error("Database initialization failed:", error);
+        return Response.json({ ok: false, error: String(error.message || error) }, { status: 500 });
+      }
     }
 
     if (request.method === "POST" && url.pathname === "/admin/setup-webhook") {
@@ -95,6 +111,45 @@ export default {
     ctx.waitUntil(runSchedule(env));
   }
 };
+
+async function initializeDatabase(db) {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS videos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tiktok_url TEXT NOT NULL UNIQUE,
+      video_id TEXT UNIQUE,
+      author_username TEXT,
+      author_name TEXT,
+      video_file_url TEXT,
+      caption TEXT,
+      popular_comment TEXT,
+      status TEXT NOT NULL DEFAULT 'queued'
+        CHECK (status IN ('queued', 'processing', 'ready', 'scheduled', 'published', 'failed')),
+      submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      published_at TEXT,
+      error_message TEXT,
+      source_chat_id TEXT,
+      source_message_id TEXT
+    )`,
+    "CREATE INDEX IF NOT EXISTS idx_videos_status_submitted ON videos(status, submitted_at)",
+    `CREATE TABLE IF NOT EXISTS publication_slots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      video_id INTEGER NOT NULL UNIQUE REFERENCES videos(id) ON DELETE CASCADE,
+      scheduled_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'scheduled'
+        CHECK (status IN ('scheduled', 'publishing', 'published', 'failed')),
+      telegram_message_id TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    "CREATE INDEX IF NOT EXISTS idx_publication_slots_status_time ON publication_slots(status, scheduled_at)",
+    `CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`,
+    "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('timezone', 'Asia/Tashkent'), ('daily_limit', '3'), ('telegram_channel', '@zadrot1705')"
+  ];
+  for (const sql of statements) await db.prepare(sql).run();
+}
 
 async function handleUpdate(update, env) {
   const message = update?.message;
