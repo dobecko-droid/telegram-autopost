@@ -202,7 +202,17 @@ async function initializeDatabase(db) {
 async function ensureColumn(db, table, column, definition) {
   const result = await db.prepare("PRAGMA table_info(" + table + ")").all();
   const exists = (result.results || []).some(item => item.name === column);
-  if (!exists) await db.prepare("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition).run();
+  if (exists) return;
+
+  try {
+    await db.prepare("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition).run();
+  } catch (error) {
+    // A scheduled Worker and the GitHub runner can initialize the schema
+    // at nearly the same time. Treat a concurrent successful ALTER as OK.
+    const check = await db.prepare("PRAGMA table_info(" + table + ")").all();
+    const addedByAnotherRun = (check.results || []).some(item => item.name === column);
+    if (!addedByAnotherRun) throw error;
+  }
 }
 
 async function handleUpdate(update, env) {
@@ -354,6 +364,7 @@ async function handleAiMessage(message, env) {
 }
 
 async function runnerClaim(env) {
+  await initializeDatabase(env.DB);
   const nowIso = new Date().toISOString();
   const staleBefore = new Date(Date.now() - 15 * 60 * 1000).toISOString();
   await env.DB.prepare(
@@ -427,6 +438,7 @@ async function runSchedule(env) {
     return;
   }
 
+  await initializeDatabase(env.DB);
   if (env.EXTERNAL_DOWNLOADER !== "true") await processQueuedVideos(env);
   await assignPublicationSlots(env);
   await publishDueVideos(env);
