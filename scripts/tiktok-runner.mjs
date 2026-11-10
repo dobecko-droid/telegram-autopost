@@ -4,7 +4,7 @@ import { readFile, unlink } from "node:fs/promises";
 
 const exec = promisify(execFile);
 const WORKER_URL = process.env.WORKER_URL;
-const RUNNER_SECRET = String(process.env.RUNNER_SECRET || "").trim();
+const RUNNER_SECRET = String(process.env.RUNNER_SECRET || "").replace(/\u2060/g, "").trim();
 const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
 
 if (!WORKER_URL || !RUNNER_SECRET || !TELEGRAM_BOT_TOKEN) {
