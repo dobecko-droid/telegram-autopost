@@ -190,6 +190,11 @@ async function initializeDatabase(db) {
     )`
   ];
   for (const sql of statements) await db.prepare(sql).run();
+  // Upgrade databases created by earlier versions: CREATE TABLE IF NOT EXISTS
+  // does not add columns to an already-existing videos table.
+  await ensureColumn(db, "videos", "error_message", "TEXT");
+  await ensureColumn(db, "videos", "source_chat_id", "TEXT");
+  await ensureColumn(db, "videos", "source_message_id", "TEXT");
   await ensureColumn(db, "videos", "attempt_count", "INTEGER NOT NULL DEFAULT 0");
   await ensureColumn(db, "videos", "next_attempt_at", "TEXT");
   await ensureColumn(db, "videos", "last_attempt_at", "TEXT");
