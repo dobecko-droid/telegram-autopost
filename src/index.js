@@ -126,6 +126,9 @@ export default {
       }
 
       try {
+        // Upgrade legacy D1 schemas before handleUpdate writes source_chat_id
+        // and source_message_id or the processing pipeline reads retry columns.
+        await initializeDatabase(env.DB);
         await handleUpdate(update, env);
         // Start processing a newly submitted link immediately instead of waiting
         // for the next five-minute cron tick. The DB claim below prevents races.
@@ -438,12 +441,20 @@ async function runnerComplete(request, env) {
 }
 
 async function runSchedule(env) {
-  if (!env.DB || !env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHANNEL) {
-    console.error("Scheduler is missing DB, TELEGRAM_BOT_TOKEN, or TELEGRAM_CHANNEL");
+  if (!env.DB) {
+    console.error("Scheduler is missing DB");
     return;
   }
 
+  // Always migrate the database before checking optional delivery settings.
+  // Otherwise a missing Telegram setting can silently skip schema upgrades.
   await initializeDatabase(env.DB);
+
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHANNEL) {
+    console.error("Scheduler is missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHANNEL");
+    return;
+  }
+
   if (env.EXTERNAL_DOWNLOADER !== "true") await processQueuedVideos(env);
   await assignPublicationSlots(env);
   await publishDueVideos(env);
