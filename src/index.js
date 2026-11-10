@@ -92,7 +92,7 @@ export default {
         return Response.json({ ok: false, error: "no_db" }, { status: 503 });
       }
       const acceptedSecrets = [env.RUNNER_SECRET, env.TELEGRAM_WEBHOOK_SECRET]
-        .map(value => String(value || "").trim())
+        .map(value => String(value || "").replace(/\u2060/g, "").trim())
         .filter(Boolean);
       if (!acceptedSecrets.length) {
         return Response.json({ ok: false, error: "no_secret" }, { status: 503 });
